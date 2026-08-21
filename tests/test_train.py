@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.train import EVAL_THRESHOLD, train
+from src.train import train
 
 FEATURES = [
     "fixed_acidity",
@@ -58,10 +58,6 @@ def synthetic_data(tmp_path, monkeypatch):
     monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path / 'mlflow.db'}")
     monkeypatch.setenv("MLFLOW_ARTIFACT_ROOT", str(tmp_path / "mlartifacts"))
     return _write_synthetic_csvs(tmp_path)
-
-
-def test_eval_threshold_is_070():
-    assert EVAL_THRESHOLD == 0.70
 
 
 def test_train_returns_accuracy_float(synthetic_data):

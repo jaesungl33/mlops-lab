@@ -1,23 +1,18 @@
-"""Simulate a new data arrival by replacing train_phase1 with train_phase2.
+"""Append train_phase2 onto train_phase1 to simulate newly collected data."""
 
-After running this script:
-    dvc add data/train_phase1.csv
-    git add data/train_phase1.csv.dvc
-    git commit -m "data: add phase-2 training samples"
-    git push
-The GitHub Actions pipeline then retrains, evaluates, and deploys automatically.
-"""
+import pandas as pd
 
-import shutil
-
-SRC = "data/train_phase2.csv"
-DST = "data/train_phase1.csv"
+PHASE1 = "data/train_phase1.csv"
+PHASE2 = "data/train_phase2.csv"
 
 
 def main() -> None:
-    shutil.copyfile(SRC, DST)
-    print(f"Copied {SRC} -> {DST}")
-    print("Next: dvc add data/train_phase1.csv && git add data/train_phase1.csv.dvc")
+    phase1 = pd.read_csv(PHASE1)
+    phase2 = pd.read_csv(PHASE2)
+    n_before = len(phase1)
+    combined = pd.concat([phase1, phase2], ignore_index=True)
+    combined.to_csv(PHASE1, index=False)
+    print(f"Cập nhật dữ liệu: {n_before} -> {len(combined)} mẫu")
 
 
 if __name__ == "__main__":

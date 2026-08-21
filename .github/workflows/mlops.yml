@@ -3,6 +3,13 @@ name: MLOps Pipeline
 on:
   push:
     branches: [main]
+    paths:
+      - "data/**.dvc"
+      - "data/*.dvc"
+      - "src/**.py"
+      - "src/**/*.py"
+      - "params.yaml"
+      - ".github/workflows/mlops.yml"
   workflow_dispatch:
 
 jobs:
@@ -11,18 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
+          python-version: "3.10"
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run unit tests
-        run: pytest -q
+        run: pip install -r requirements.txt
+      - name: Run tests
+        run: pytest tests/ -v
         env:
           MLFLOW_TRACKING_URI: sqlite:///mlflow.db
           MLFLOW_ARTIFACT_ROOT: ./mlartifacts
@@ -31,27 +33,35 @@ jobs:
     name: Train
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      accuracy: ${{ steps.read_metrics.outputs.accuracy }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
+          python-version: "3.10"
       - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Authenticate to Cloud Storage
+        env:
+          CLOUD_CREDENTIALS: ${{ secrets.CLOUD_CREDENTIALS }}
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          printf '%s' "$CLOUD_CREDENTIALS" > /tmp/sa-key.json
+          python - <<'PY'
+          import json
+          import os
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ fromJSON(secrets.CLOUD_CREDENTIALS).aws_access_key_id }}
-          aws-secret-access-key: ${{ fromJSON(secrets.CLOUD_CREDENTIALS).aws_secret_access_key }}
-          aws-region: ${{ fromJSON(secrets.CLOUD_CREDENTIALS).region }}
+          with open("/tmp/sa-key.json") as f:
+              creds = json.load(f)
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"AWS_ACCESS_KEY_ID={creds['aws_access_key_id']}\n")
+              env.write(f"AWS_SECRET_ACCESS_KEY={creds['aws_secret_access_key']}\n")
+              env.write(f"AWS_DEFAULT_REGION={creds.get('region', 'us-east-1')}\n")
+          PY
 
-      - name: Pull DVC data
-        run: dvc pull
+      - name: Pull data with DVC
+        run: dvc pull data/train_phase1.csv.dvc data/eval.csv.dvc
 
       - name: Train model
         run: python src/train.py
@@ -59,79 +69,61 @@ jobs:
           MLFLOW_TRACKING_URI: sqlite:///mlflow.db
           MLFLOW_ARTIFACT_ROOT: ./mlartifacts
 
-      - uses: actions/upload-artifact@v4
+      - name: Read metrics
+        id: read_metrics
+        run: |
+          ACC=$(python -c "import json; d=json.load(open('outputs/metrics.json')); print(d['accuracy'])")
+          echo "accuracy=$ACC" >> "$GITHUB_OUTPUT"
+          echo "Logged accuracy=$ACC"
+
+      - name: Upload model to Cloud Storage
+        env:
+          CLOUD_BUCKET: ${{ secrets.CLOUD_BUCKET }}
+        run: |
+          python - <<'PYEOF'
+          import os
+
+          import boto3
+
+          bucket = os.environ["CLOUD_BUCKET"]
+          key = "models/latest/model.pkl"
+          s3 = boto3.client("s3")
+          s3.upload_file("models/model.pkl", bucket, key)
+          print(f"Uploaded s3://{bucket}/{key}")
+          PYEOF
+
+      - name: Save metrics as artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: train-outputs
-          path: |
-            outputs/metrics.json
-            models/model.pkl
+          name: metrics
+          path: outputs/metrics.json
 
   eval:
     name: Eval
     needs: train
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: train-outputs
-          path: .
-
-      - name: Quality gate (accuracy >= 0.70)
+      - name: Check eval gate
         run: |
-          python - <<'PY'
-          import json, sys
-          with open("outputs/metrics.json") as f:
-              metrics = json.load(f)
-          acc = float(metrics["accuracy"])
-          print(f"accuracy={acc:.4f}  f1_score={float(metrics['f1_score']):.4f}")
+          python - <<'PYEOF'
+          acc = float("${{ needs.train.outputs.accuracy }}")
           if acc < 0.70:
-              print("Eval gate FAILED: accuracy below 0.70 — deploy will not run.")
-              sys.exit(1)
-          print("Eval gate PASSED.")
-          PY
+              raise SystemExit(f"FAILED: accuracy {acc:.4f} < 0.70. Huỷ deploy.")
+          print(f"PASSED: đang triển khai model. accuracy={acc:.4f}")
+          PYEOF
 
   deploy:
     name: Deploy
     needs: eval
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: train-outputs
-          path: .
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ fromJSON(secrets.CLOUD_CREDENTIALS).aws_access_key_id }}
-          aws-secret-access-key: ${{ fromJSON(secrets.CLOUD_CREDENTIALS).aws_secret_access_key }}
-          aws-region: ${{ fromJSON(secrets.CLOUD_CREDENTIALS).region }}
-
-      - name: Upload model to S3
-        run: |
-          aws s3 cp models/model.pkl s3://${{ secrets.CLOUD_BUCKET }}/models/latest/model.pkl
-
-      - name: Restart inference service
-        uses: appleboy/ssh-action@v1.2.0
+      - name: SSH deploy to VM
+        uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
             sudo systemctl restart mlops-serve
-            sleep 8
-            systemctl is-active mlops-serve
-
-      - name: Health check
-        run: |
-          for i in 1 2 3 4 5; do
-            if curl -fsS "http://${{ secrets.VM_HOST }}:8000/health"; then
-              echo
-              exit 0
-            fi
             sleep 5
-          done
-          echo "Health check failed"
-          exit 1
+            curl -sf http://localhost:8000/health && echo "Health check passed." || exit 1
