@@ -1,0 +1,12 @@
+pandas==2.2.2
+scikit-learn==1.4.2
+mlflow==2.16.2
+pyyaml==6.0.2
+joblib==1.4.2
+fastapi==0.115.0
+uvicorn==0.30.6
+boto3==1.35.36
+dvc[s3]==3.55.2
+pathspec==0.12.1
+pytest==8.3.3
+pydantic==2.9.2
